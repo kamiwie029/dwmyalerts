@@ -53,11 +53,16 @@ var i_enable_d_alert = input.bool(true, "Daily cross alert", "Enables or disable
 var i_enable_m_alert = input.bool(true, "Monthly cross alert", "Enables or disables alerts on the Monthly open cross", group="Alerts")
 var i_enable_w_alert = input.bool(true, "Weekly cross alert", "Enables or disables alerts on the Weekly open cross", group="Alerts")
 var i_enable_y_alert = input.bool(true, "Yearly cross alert", "Enables or disables alerts on the Yearly open cross", group="Alerts")
+var i_alert_trigger = input.string("Candle close", "Alert trigger", ["Candle close", "Real-time"], "Change whether to send an alert when candle closed and crossed DWMY, or real-time cross.")
+var i_deadzone_enable = input.bool(true, "Enable deadzone", "Enables or disables the deadzone", inline="01", group="Alerts")
+var i_deadzone_percentage = input.float(1, "%", minval=0, maxval=100,step=0.05, inline="01", group="Alerts", tooltip = "After alerting any of the DWMY, price movements within this % range (+x% and -x%) will be ignored. After price moves outside of this range the alerts will be resumed again. e.g. if the DO is $1 and deadzone is 1% then the deadzone would be the 0.99-1.01 range.")
+var i_time_ignore = input.float(10, "Time to deadzone reset", minval=0, maxval=60,step=1, inline="00", group="Alerts", tooltip = "Disables the deadzone after x minutes. Set to 0 to disable")
+
 
 //--------------------------------------------------------------------
 //                        Variables declarations
 //--------------------------------------------------------------------
-
+series int last_alert_time = na
 var a_lastOpens             = array.new_float(4)
 var canShowDaily            = i_isDailyEnabled and timeframe.isintraday
 var canShowWeekly           = i_isWeeklyEnabled and (timeframe.isintraday or timeframe.isdaily)
@@ -76,11 +81,35 @@ hasWeekklyTimeChanged       = hasExtendedHours ? weekofyear != weekofyear[1] : w
 hasMonthlyTimeChanged       = hasExtendedHours ? month != month[1] : monthlyTime != monthlyTime[1]
 hasYearlyTimeChanged        = hasExtendedHours ? year != year[1] : yearlyTime != yearlyTime[1]
 
-lastClosedPrice = request.security(syminfo.tickerid, "1", close[1])
+
+trigger_value = i_alert_trigger == "Candle close" ? 1 : 0
+last_price = request.security(syminfo.tickerid, "1", close[trigger_value])
+
+var a_deadzone_checks = array.new_bool(4, false)
+
+if hasDailyTimeChanged or hasWeekklyTimeChanged or hasMonthlyTimeChanged or hasYearlyTimeChanged
+    array.set(a_deadzone_checks, 0, true)
+    array.set(a_deadzone_checks, 1, true)
+    array.set(a_deadzone_checks, 2, true)
+    array.set(a_deadzone_checks, 3, true)
 
 //--------------------------------------------------------------------
 //                              Functions 
 //--------------------------------------------------------------------
+
+f_calculate_price_deadzone_range(float dwmo_price) =>
+    float range_offset = dwmo_price * i_deadzone_percentage / 100
+    [dwmo_price - range_offset, dwmo_price + range_offset]
+
+f_check_deadzone(float dwmo_price, float last_price) =>
+    if not i_deadzone_enable
+        false
+
+    [low_range, high_range] = f_calculate_price_deadzone_range(dwmo_price)
+    if last_price > high_range or last_price < low_range
+        false
+    else
+        true
 
 // If different opens share the same opening prices, their labels will overlap
 // Instead, we pad the higher time frame ones for achieving a "separator sheet"
@@ -181,20 +210,43 @@ if canShowWeekly
 if canShowDaily
     f_draw(hasDailyTimeChanged, array.get(a_lastOpens, 0), i_dailyLookback, f_getPadding(0), i_dailyColor, "D   ")
 
-if i_enable_y_alert and ta.crossover(array.get(a_lastOpens, 3), lastClosedPrice)
+
+for timeframe_index=0 to (array.size(a_deadzone_checks)-1)
+    if array.get(a_deadzone_checks, timeframe_index)
+        array.set(a_deadzone_checks, timeframe_index, f_check_deadzone(array.get(a_lastOpens, timeframe_index), last_price))
+
+if not na(last_alert_time) and (timenow - last_alert_time) > (i_time_ignore * 60 * 1000)
+    array.set(a_deadzone_checks, 0, false)
+    array.set(a_deadzone_checks, 1, false)
+    array.set(a_deadzone_checks, 2, false)
+    array.set(a_deadzone_checks, 3, false)
+
+if i_enable_y_alert and not array.get(a_deadzone_checks, 3) and ta.crossover(array.get(a_lastOpens, 3), last_price)
     alert("Yearly crossover on " + ticker.standard(syminfo.tickerid))
+    array.set(a_deadzone_checks, 3, true)
+    last_alert_time := timenow
 
-else if i_enable_m_alert and ta.crossover(array.get(a_lastOpens, 2), lastClosedPrice)
+else if i_enable_m_alert and not array.get(a_deadzone_checks, 2) and ta.crossover(array.get(a_lastOpens, 2), last_price)
     alert("Monthly crossover on " + ticker.standard(syminfo.tickerid))
+    array.set(a_deadzone_checks, 2, true)
+    last_alert_time := timenow
 
-else if i_enable_w_alert and ta.crossover(array.get(a_lastOpens, 1), lastClosedPrice)
+else if i_enable_w_alert and not array.get(a_deadzone_checks, 1) and ta.crossover(array.get(a_lastOpens, 1), last_price)
     alert("Weekly crossover on " + ticker.standard(syminfo.tickerid))
+    array.set(a_deadzone_checks, 1, true)
+    last_alert_time := timenow
 
-else if i_enable_d_alert and ta.crossover(array.get(a_lastOpens, 0), lastClosedPrice)
+else if i_enable_d_alert and not array.get(a_deadzone_checks, 0) and ta.crossover(array.get(a_lastOpens, 0), last_price)
     alert("Daily crossover on " + ticker.standard(syminfo.tickerid))
+    array.set(a_deadzone_checks, 0, true)
+    last_alert_time := timenow
+
+
 
 // Plot invisible opens for displaying last values in `status line`, `scale`, `data window` as well for providing defaults alert conditions
 plot(array.get(a_lastOpens, 0), "D",    color.new(i_dailyColor, 100),   editable=false)
 plot(array.get(a_lastOpens, 1), "W",    color.new(i_weeklyColor, 100),  editable=false)
+plot(array.get(a_lastOpens, 2), "M",    color.new(i_monthlyColor, 100), editable=false)
+plot(array.get(a_lastOpens, 3), "Y",    color.new(i_yearlyColor, 100),  editable=false)
 plot(array.get(a_lastOpens, 2), "M",    color.new(i_monthlyColor, 100), editable=false)
 plot(array.get(a_lastOpens, 3), "Y",    color.new(i_yearlyColor, 100),  editable=false)
